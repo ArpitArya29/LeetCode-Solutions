@@ -10,13 +10,10 @@
 10            long upper = Math.min(lower * 1000 - 1, n);
 11            res += commas * (upper - lower + 1);
 12            lower = lower * 1000;
-13            // upper = lower * 1000 - 1;
-14
-15            commas++;
-16        }
-17
-18        // res += (Math.min(upper, n) - lower + 1);
-19
-20        return res;
-21    }
-22}
+13            
+14            commas++;
+15        }
+16
+17        return res;
+18    }
+19}
