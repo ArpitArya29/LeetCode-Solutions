@@ -2,7 +2,8 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql";
+const LEETCODE_API_BASE =
+  "https://leetcode-api-pied.vercel.app/problem";
 
 const SOLUTION_EXTENSIONS = new Set([
   ".java",
@@ -21,93 +22,33 @@ const SOLUTION_EXTENSIONS = new Set([
 const BEFORE_SHA = process.env.BEFORE_SHA;
 const AFTER_SHA = process.env.AFTER_SHA;
 
-async function leetCodeRequest(query, variables) {
-  const response = await fetch(LEETCODE_GRAPHQL_URL, {
-    method: "POST",
+async function fetchProblem(problemNumber) {
+  const url = `${LEETCODE_API_BASE}/${problemNumber}`;
+
+  console.log(
+    `Fetching problem #${problemNumber} from public problem API...`
+  );
+
+  const response = await fetch(url, {
     headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0",
+      Accept: "application/json",
+      "User-Agent": "LeetCode-Solutions-README-Generator",
     },
-    body: JSON.stringify({
-      query,
-      variables,
-    }),
   });
 
   if (!response.ok) {
     throw new Error(
-      `LeetCode request failed with HTTP ${response.status}`
+      `Problem API request failed with HTTP ${response.status}`
     );
   }
 
   const data = await response.json();
 
-  if (data.errors) {
-    throw new Error(
-      `LeetCode GraphQL error: ${JSON.stringify(data.errors)}`
-    );
+  if (!data || typeof data !== "object") {
+    throw new Error("Problem API returned an invalid response.");
   }
 
   return data;
-}
-
-async function findProblem(problemNumber) {
-  const query = `
-    query problemsetQuestionListV2(
-      $limit: Int,
-      $searchKeyword: String,
-      $skip: Int,
-      $categorySlug: String
-    ) {
-      problemsetQuestionListV2(
-        limit: $limit,
-        searchKeyword: $searchKeyword,
-        skip: $skip,
-        categorySlug: $categorySlug
-      ) {
-        questions {
-          questionFrontendId
-          title
-          titleSlug
-        }
-      }
-    }
-  `;
-
-  const result = await leetCodeRequest(query, {
-    limit: 100,
-    searchKeyword: String(problemNumber),
-    skip: 0,
-    categorySlug: "",
-  });
-
-  const questions =
-    result.data?.problemsetQuestionListV2?.questions || [];
-
-  return questions.find(
-    (question) =>
-      String(question.questionFrontendId) ===
-      String(problemNumber)
-  );
-}
-
-async function fetchProblemContent(titleSlug) {
-  const query = `
-    query questionData($titleSlug: String!) {
-      question(titleSlug: $titleSlug) {
-        questionFrontendId
-        title
-        titleSlug
-        content
-      }
-    }
-  `;
-
-  const result = await leetCodeRequest(query, {
-    titleSlug,
-  });
-
-  return result.data?.question;
 }
 
 function stripHtml(html) {
@@ -126,36 +67,25 @@ function stripHtml(html) {
 }
 
 function createProblemOverview(content) {
-  if (!content) {
-    return "";
+  if (!content || typeof content !== "string") {
+    throw new Error("Problem description is missing.");
   }
 
-  /*
-   * Extract the first meaningful paragraph from
-   * LeetCode's HTML problem description.
-   */
   const paragraphs = content
     .split(/<\/p>/i)
     .map((paragraph) => stripHtml(paragraph))
-    .filter((paragraph) => paragraph.length > 0);
+    .filter(Boolean);
 
   if (paragraphs.length === 0) {
-    return "";
+    throw new Error("Could not extract problem description.");
   }
 
   let overview = paragraphs[0];
 
-  /*
-   * If the first paragraph is very short,
-   * include the second one as additional context.
-   */
   if (overview.length < 200 && paragraphs.length > 1) {
     overview += ` ${paragraphs[1]}`;
   }
 
-  /*
-   * Keep the README concise.
-   */
   if (overview.length > 1000) {
     overview =
       overview.substring(0, 1000).split(" ").slice(0, -1).join(" ") +
@@ -173,20 +103,13 @@ function getChangedFiles() {
     try {
       return execFileSync(
         "git",
-        [
-          "diff",
-          "--name-only",
-          BEFORE_SHA,
-          AFTER_SHA,
-        ],
-        {
-          encoding: "utf8",
-        }
+        ["diff", "--name-only", BEFORE_SHA, AFTER_SHA],
+        { encoding: "utf8" }
       )
         .split("\n")
         .map((file) => file.trim())
         .filter(Boolean);
-    } catch (error) {
+    } catch {
       console.log(
         "Could not compare commits. Falling back to current commit."
       );
@@ -195,15 +118,8 @@ function getChangedFiles() {
 
   return execFileSync(
     "git",
-    [
-      "show",
-      "--pretty=",
-      "--name-only",
-      AFTER_SHA,
-    ],
-    {
-      encoding: "utf8",
-    }
+    ["show", "--pretty=", "--name-only", AFTER_SHA],
+    { encoding: "utf8" }
   )
     .split("\n")
     .map((file) => file.trim())
@@ -231,9 +147,7 @@ function getProblemDirectories(changedFiles) {
 }
 
 function extractProblemNumber(folderName) {
-  const match = folderName.match(
-    /^\s*(\d+)[.\-_ ]+(.+?)\s*$/
-  );
+  const match = folderName.match(/^\s*(\d+)[.\-_ ]+/);
 
   return match ? match[1] : null;
 }
@@ -242,10 +156,7 @@ function getSolutionFiles(problemDirectory) {
   return fs
     .readdirSync(problemDirectory)
     .filter((file) => {
-      const fullPath = path.join(
-        problemDirectory,
-        file
-      );
+      const fullPath = path.join(problemDirectory, file);
 
       if (!fs.statSync(fullPath).isFile()) {
         return false;
@@ -288,187 +199,161 @@ ${solutionList}
 }
 
 async function processProblemDirectory(problemDirectory) {
-  const readmePath = path.join(
-    problemDirectory,
-    "README.md"
-  );
+  const readmePath = path.join(problemDirectory, "README.md");
 
-  /*
-   * IMPORTANT:
-   * Never overwrite an existing README.
-   */
+  // Never overwrite an existing README.
   if (fs.existsSync(readmePath)) {
-    console.log(
-      `README already exists: ${readmePath}`
-    );
+    console.log(`README already exists: ${readmePath}`);
     console.log("Skipping.");
     return null;
   }
 
   const folderName = path.basename(problemDirectory);
-
-  const problemNumber =
-    extractProblemNumber(folderName);
+  const problemNumber = extractProblemNumber(folderName);
 
   if (!problemNumber) {
-    console.log(
-      `Could not determine problem number from: ${folderName}`
+    throw new Error(
+      `Could not determine problem number from folder: ${folderName}`
     );
-    return null;
   }
 
-  console.log(
-    `Looking up LeetCode problem #${problemNumber}...`
-  );
+  console.log(`Looking up LeetCode problem #${problemNumber}...`);
 
-  try {
-    const problem =
-      await findProblem(problemNumber);
+  const problem = await fetchProblem(problemNumber);
 
-    if (!problem) {
-      console.log(
-        `Problem #${problemNumber} was not found on LeetCode.`
-      );
-      return null;
-    }
+  const title =
+    problem.title ||
+    problem.questionTitle ||
+    problem.name;
 
-    const details =
-      await fetchProblemContent(
-        problem.titleSlug
-      );
+  const titleSlug =
+    problem.titleSlug ||
+    problem.slug;
 
-    if (!details) {
-      console.log(
-        `Could not retrieve details for #${problemNumber}.`
-      );
-      return null;
-    }
+  const content =
+    problem.content ||
+    problem.description ||
+    problem.question;
 
-    const overview =
-      createProblemOverview(
-        details.content
-      );
-
-    if (!overview) {
-      console.log(
-        `Could not create an overview for #${problemNumber}.`
-      );
-      return null;
-    }
-
-    const solutionFiles =
-      getSolutionFiles(problemDirectory);
-
-    const readme =
-      createReadme({
-        problemNumber,
-        title: problem.title,
-        overview,
-        titleSlug: problem.titleSlug,
-        solutionFiles,
-      });
-
-    fs.writeFileSync(
-      readmePath,
-      readme,
-      "utf8"
+  // Validate everything BEFORE creating the README.
+  if (!title) {
+    throw new Error(
+      `Problem #${problemNumber}: title missing from API response.`
     );
-
-    console.log(
-      `Created README: ${readmePath}`
-    );
-
-    return readmePath;
-  } catch (error) {
-    /*
-     * IMPORTANT:
-     * Errors are logged only in GitHub Actions.
-     * They are NEVER written to README.md.
-     */
-    console.error(
-      `Failed to generate README for ${folderName}:`
-    );
-    console.error(error.message);
-
-    return null;
   }
+
+  if (!titleSlug) {
+    throw new Error(
+      `Problem #${problemNumber}: titleSlug missing from API response.`
+    );
+  }
+
+  if (!content) {
+    throw new Error(
+      `Problem #${problemNumber}: problem description missing from API response.`
+    );
+  }
+
+  const overview = createProblemOverview(content);
+
+  const solutionFiles = getSolutionFiles(problemDirectory);
+
+  if (solutionFiles.length === 0) {
+    throw new Error(
+      `No solution files found in ${problemDirectory}.`
+    );
+  }
+
+  const readme = createReadme({
+    problemNumber,
+    title,
+    overview,
+    titleSlug,
+    solutionFiles,
+  });
+
+  // README is written ONLY after all validation succeeds.
+  fs.writeFileSync(readmePath, readme, "utf8");
+
+  console.log(`Created README: ${readmePath}`);
+
+  return readmePath;
 }
 
 async function main() {
-  console.log(
-    "Starting LeetCode README generation..."
-  );
+  console.log("Starting LeetCode README generation...");
 
-  const changedFiles =
-    getChangedFiles();
-
+  const changedFiles = getChangedFiles();
   const problemDirectories =
-    getProblemDirectories(
-      changedFiles
-    );
+    getProblemDirectories(changedFiles);
 
   if (problemDirectories.length === 0) {
-    console.log(
-      "No solution files detected."
-    );
+    console.log("No solution files detected.");
     return;
   }
+
+  console.log(
+    `Detected ${problemDirectories.length} problem directory/directories.`
+  );
 
   const generatedReadmes = [];
 
-  for (const directory of problemDirectories) {
-    const readme =
-      await processProblemDirectory(
-        directory
-      );
+  try {
+    for (const directory of problemDirectories) {
+      const readme =
+        await processProblemDirectory(directory);
 
-    if (readme) {
-      generatedReadmes.push(readme);
+      if (readme) {
+        generatedReadmes.push(readme);
+      }
     }
+  } catch (error) {
+    console.error(
+      "README generation failed."
+    );
+    console.error(error.message);
+
+    // Remove READMEs generated during this run.
+    for (const readme of generatedReadmes) {
+      if (fs.existsSync(readme)) {
+        fs.unlinkSync(readme);
+        console.log(
+          `Removed generated README: ${readme}`
+        );
+      }
+    }
+
+    // Make sure nothing from this run remains staged.
+    if (generatedReadmes.length > 0) {
+      execFileSync(
+        "git",
+        ["reset", "--", ...generatedReadmes],
+        { stdio: "inherit" }
+      );
+    }
+
+    throw error;
   }
 
   if (generatedReadmes.length === 0) {
-    console.log(
-      "No new READMEs were generated."
-    );
+    console.log("No new READMEs were generated.");
     return;
   }
 
-  /*
-   * Stage ONLY READMEs created by this workflow.
-   */
   execFileSync(
     "git",
-    [
-      "add",
-      "--",
-      ...generatedReadmes,
-    ],
-    {
-      stdio: "inherit",
-    }
+    ["add", "--", ...generatedReadmes],
+    { stdio: "inherit" }
   );
 
-  /*
-   * Don't create an empty commit.
-   */
   try {
     execFileSync(
       "git",
-      [
-        "diff",
-        "--cached",
-        "--quiet",
-      ],
-      {
-        stdio: "ignore",
-      }
+      ["diff", "--cached", "--quiet"],
+      { stdio: "ignore" }
     );
 
-    console.log(
-      "No staged changes."
-    );
-
+    console.log("No staged changes.");
     return;
   } catch {
     // Exit code 1 means staged changes exist.
@@ -476,14 +361,8 @@ async function main() {
 
   execFileSync(
     "git",
-    [
-      "config",
-      "user.name",
-      "github-actions[bot]",
-    ],
-    {
-      stdio: "inherit",
-    }
+    ["config", "user.name", "github-actions[bot]"],
+    { stdio: "inherit" }
   );
 
   execFileSync(
@@ -493,29 +372,19 @@ async function main() {
       "user.email",
       "41898282+github-actions[bot]@users.noreply.github.com",
     ],
-    {
-      stdio: "inherit",
-    }
+    { stdio: "inherit" }
   );
 
   execFileSync(
     "git",
-    [
-      "commit",
-      "-m",
-      "docs: add LeetCode problem README",
-    ],
-    {
-      stdio: "inherit",
-    }
+    ["commit", "-m", "docs: add LeetCode problem README"],
+    { stdio: "inherit" }
   );
 
   execFileSync(
     "git",
     ["push"],
-    {
-      stdio: "inherit",
-    }
+    { stdio: "inherit" }
   );
 
   console.log(
@@ -524,10 +393,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(
-    "Workflow failed:",
-    error
-  );
-
+  console.error("Workflow failed:", error);
   process.exit(1);
 });
