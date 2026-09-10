@@ -5,6 +5,10 @@ const { execFileSync } = require("child_process");
 const LEETCODE_API_BASE =
   "https://leetcode-api-pied.vercel.app/problem";
 
+const API_TIMEOUT_MS = 15000;
+const MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_OVERVIEW_LENGTH = 1000;
+
 const SOLUTION_EXTENSIONS = new Set([
   ".java",
   ".js",
@@ -22,37 +26,102 @@ const SOLUTION_EXTENSIONS = new Set([
 const BEFORE_SHA = process.env.BEFORE_SHA;
 const AFTER_SHA = process.env.AFTER_SHA;
 
+function isValidCommitSha(value) {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{40}$/i.test(value)
+  );
+}
+
 async function fetchProblem(problemNumber) {
-  const url = `${LEETCODE_API_BASE}/${problemNumber}`;
+  const url = `${LEETCODE_API_BASE}/${encodeURIComponent(
+    problemNumber
+  )}`;
 
   console.log(
     `Fetching problem #${problemNumber} from public problem API...`
   );
 
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      "User-Agent": "LeetCode-Solutions-README-Generator",
-    },
-  });
+  const controller = new AbortController();
 
-  if (!response.ok) {
-    throw new Error(
-      `Problem API request failed with HTTP ${response.status}`
-    );
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, API_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "LeetCode-Solutions-README-Generator",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Problem API request failed with HTTP ${response.status}.`
+      );
+    }
+
+    const contentLength = response.headers.get("content-length");
+
+    if (
+      contentLength &&
+      Number(contentLength) > MAX_API_RESPONSE_BYTES
+    ) {
+      throw new Error(
+        "Problem API response is unexpectedly large."
+      );
+    }
+
+    const buffer = await response.arrayBuffer();
+
+    if (buffer.byteLength > MAX_API_RESPONSE_BYTES) {
+      throw new Error(
+        "Problem API response exceeded the allowed size."
+      );
+    }
+
+    const text = new TextDecoder().decode(buffer);
+
+    let data;
+
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(
+        "Problem API returned invalid JSON."
+      );
+    }
+
+    if (!data || typeof data !== "object") {
+      throw new Error(
+        "Problem API returned an invalid response."
+      );
+    }
+
+    return data;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(
+        "Problem API request timed out."
+      );
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const data = await response.json();
-
-  if (!data || typeof data !== "object") {
-    throw new Error("Problem API returned an invalid response.");
-  }
-
-  return data;
 }
 
 function stripHtml(html) {
   return html
+    // Remove script/style blocks and their contents.
+    .replace(
+      /<(script|style)[^>]*>[\s\S]*?<\/\1>/gi,
+      " "
+    )
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p>/gi, "\n")
     .replace(/<[^>]*>/g, " ")
@@ -67,8 +136,13 @@ function stripHtml(html) {
 }
 
 function createProblemOverview(content) {
-  if (!content || typeof content !== "string") {
-    throw new Error("Problem description is missing.");
+  if (
+    typeof content !== "string" ||
+    content.trim().length === 0
+  ) {
+    throw new Error(
+      "Problem description is missing."
+    );
   }
 
   const paragraphs = content
@@ -77,19 +151,27 @@ function createProblemOverview(content) {
     .filter(Boolean);
 
   if (paragraphs.length === 0) {
-    throw new Error("Could not extract problem description.");
+    throw new Error(
+      "Could not extract problem description."
+    );
   }
 
   let overview = paragraphs[0];
 
-  if (overview.length < 200 && paragraphs.length > 1) {
+  if (
+    overview.length < 200 &&
+    paragraphs.length > 1
+  ) {
     overview += ` ${paragraphs[1]}`;
   }
 
-  if (overview.length > 1000) {
+  if (overview.length > MAX_OVERVIEW_LENGTH) {
     overview =
-      overview.substring(0, 1000).split(" ").slice(0, -1).join(" ") +
-      "...";
+      overview
+        .substring(0, MAX_OVERVIEW_LENGTH)
+        .split(" ")
+        .slice(0, -1)
+        .join(" ") + "...";
   }
 
   return overview;
@@ -97,14 +179,23 @@ function createProblemOverview(content) {
 
 function getChangedFiles() {
   if (
-    BEFORE_SHA &&
+    isValidCommitSha(BEFORE_SHA) &&
+    isValidCommitSha(AFTER_SHA) &&
     BEFORE_SHA !== "0000000000000000000000000000000000000000"
   ) {
     try {
       return execFileSync(
         "git",
-        ["diff", "--name-only", BEFORE_SHA, AFTER_SHA],
-        { encoding: "utf8" }
+        [
+          "diff",
+          "--name-only",
+          BEFORE_SHA,
+          AFTER_SHA,
+        ],
+        {
+          encoding: "utf8",
+          maxBuffer: 1024 * 1024,
+        }
       )
         .split("\n")
         .map((file) => file.trim())
@@ -116,10 +207,24 @@ function getChangedFiles() {
     }
   }
 
+  if (!isValidCommitSha(AFTER_SHA)) {
+    throw new Error(
+      "Invalid GitHub commit SHA."
+    );
+  }
+
   return execFileSync(
     "git",
-    ["show", "--pretty=", "--name-only", AFTER_SHA],
-    { encoding: "utf8" }
+    [
+      "show",
+      "--pretty=",
+      "--name-only",
+      AFTER_SHA,
+    ],
+    {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    }
   )
     .split("\n")
     .map((file) => file.trim())
@@ -130,7 +235,8 @@ function getProblemDirectories(changedFiles) {
   const directories = new Set();
 
   for (const file of changedFiles) {
-    const extension = path.extname(file).toLowerCase();
+    const extension =
+      path.extname(file).toLowerCase();
 
     if (!SOLUTION_EXTENSIONS.has(extension)) {
       continue;
@@ -146,17 +252,27 @@ function getProblemDirectories(changedFiles) {
   return [...directories].sort();
 }
 
-function extractProblemNumber(folderName) {
-  const match = folderName.match(/^\s*(\d+)[.\-_ ]+/);
+function extractProblemInfo(folderName) {
+  const match = folderName.match(
+    /^\s*(\d+)[.\-_ ]+(.+?)\s*$/
+  );
 
-  return match ? match[1] : null;
+  if (!match) {
+    return null;
+  }
+
+  return {
+    number: match[1],
+    title: match[2].trim(),
+  };
 }
 
 function getSolutionFiles(problemDirectory) {
   return fs
     .readdirSync(problemDirectory)
     .filter((file) => {
-      const fullPath = path.join(problemDirectory, file);
+      const fullPath =
+        path.join(problemDirectory, file);
 
       if (!fs.statSync(fullPath).isFile()) {
         return false;
@@ -169,11 +285,48 @@ function getSolutionFiles(problemDirectory) {
     .sort();
 }
 
+function validateLeetCodeUrl(value) {
+  if (typeof value !== "string") {
+    throw new Error(
+      "Problem URL is missing from API response."
+    );
+  }
+
+  let parsed;
+
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      "Problem API returned an invalid URL."
+    );
+  }
+
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname !== "leetcode.com"
+  ) {
+    throw new Error(
+      "Problem API returned an untrusted URL."
+    );
+  }
+
+  if (
+    !parsed.pathname.startsWith("/problems/")
+  ) {
+    throw new Error(
+      "Problem API returned an invalid LeetCode problem URL."
+    );
+  }
+
+  return parsed.toString();
+}
+
 function createReadme({
   problemNumber,
   title,
   overview,
-  titleSlug,
+  problemUrl,
   solutionFiles,
 }) {
   const solutionList = solutionFiles
@@ -194,69 +347,83 @@ ${solutionList}
 
 ## LeetCode
 
-[View Problem on LeetCode](https://leetcode.com/problems/${titleSlug}/)
+[View Problem on LeetCode](${problemUrl})
 `;
 }
 
-async function processProblemDirectory(problemDirectory) {
-  const readmePath = path.join(problemDirectory, "README.md");
+async function processProblemDirectory(
+  problemDirectory
+) {
+  const readmePath = path.join(
+    problemDirectory,
+    "README.md"
+  );
 
   // Never overwrite an existing README.
   if (fs.existsSync(readmePath)) {
-    console.log(`README already exists: ${readmePath}`);
+    console.log(
+      `README already exists: ${readmePath}`
+    );
     console.log("Skipping.");
     return null;
   }
 
-  const folderName = path.basename(problemDirectory);
-  const problemNumber = extractProblemNumber(folderName);
+  const folderName =
+    path.basename(problemDirectory);
 
-  if (!problemNumber) {
+  const problemInfo =
+    extractProblemInfo(folderName);
+
+  if (!problemInfo) {
     throw new Error(
-      `Could not determine problem number from folder: ${folderName}`
+      `Could not determine problem number and title from folder: ${folderName}`
     );
   }
 
-  console.log(`Looking up LeetCode problem #${problemNumber}...`);
+  const {
+    number: problemNumber,
+    title,
+  } = problemInfo;
 
-  const problem = await fetchProblem(problemNumber);
+  console.log(
+    `Looking up LeetCode problem #${problemNumber}...`
+  );
 
-  const title =
-    problem.title ||
-    problem.questionTitle ||
-    problem.name;
+  const problem =
+    await fetchProblem(problemNumber);
 
-  const titleSlug =
-    problem.titleSlug ||
-    problem.slug;
+  /*
+   * We deliberately take the problem number and title
+   * from the trusted folder created by Leet2Hub.
+   *
+   * The external API is used only for the description
+   * and official LeetCode URL.
+   */
+  const apiProblemNumber =
+    problem.questionFrontendId;
 
   const content =
-    problem.content ||
-    problem.description ||
-    problem.question;
+    problem.content;
 
-  // Validate everything BEFORE creating the README.
-  if (!title) {
+  const problemUrl =
+    validateLeetCodeUrl(problem.url);
+
+  // Cross-check the problem number.
+  if (
+    apiProblemNumber &&
+    String(apiProblemNumber) !==
+      String(problemNumber)
+  ) {
     throw new Error(
-      `Problem #${problemNumber}: title missing from API response.`
+      `Problem number mismatch: folder says ${problemNumber}, API says ${apiProblemNumber}.`
     );
   }
 
-  if (!titleSlug) {
-    throw new Error(
-      `Problem #${problemNumber}: titleSlug missing from API response.`
-    );
-  }
+  const overview =
+    createProblemOverview(content);
 
-  if (!content) {
-    throw new Error(
-      `Problem #${problemNumber}: problem description missing from API response.`
-    );
-  }
-
-  const overview = createProblemOverview(content);
-
-  const solutionFiles = getSolutionFiles(problemDirectory);
+  const solutionFiles =
+    getSolutionFiles(problemDirectory);
 
   if (solutionFiles.length === 0) {
     throw new Error(
@@ -268,27 +435,44 @@ async function processProblemDirectory(problemDirectory) {
     problemNumber,
     title,
     overview,
-    titleSlug,
+    problemUrl,
     solutionFiles,
   });
 
-  // README is written ONLY after all validation succeeds.
-  fs.writeFileSync(readmePath, readme, "utf8");
+  /*
+   * IMPORTANT:
+   *
+   * The README is written only after every required
+   * value has passed validation.
+   */
+  fs.writeFileSync(
+    readmePath,
+    readme,
+    "utf8"
+  );
 
-  console.log(`Created README: ${readmePath}`);
+  console.log(
+    `Created README: ${readmePath}`
+  );
 
   return readmePath;
 }
 
 async function main() {
-  console.log("Starting LeetCode README generation...");
+  console.log(
+    "Starting LeetCode README generation..."
+  );
 
-  const changedFiles = getChangedFiles();
+  const changedFiles =
+    getChangedFiles();
+
   const problemDirectories =
     getProblemDirectories(changedFiles);
 
   if (problemDirectories.length === 0) {
-    console.log("No solution files detected.");
+    console.log(
+      "No solution files detected."
+    );
     return;
   }
 
@@ -299,9 +483,13 @@ async function main() {
   const generatedReadmes = [];
 
   try {
-    for (const directory of problemDirectories) {
+    for (
+      const directory of problemDirectories
+    ) {
       const readme =
-        await processProblemDirectory(directory);
+        await processProblemDirectory(
+          directory
+        );
 
       if (readme) {
         generatedReadmes.push(readme);
@@ -313,47 +501,64 @@ async function main() {
     );
     console.error(error.message);
 
-    // Remove READMEs generated during this run.
-    for (const readme of generatedReadmes) {
+    /*
+     * Fail closed:
+     * remove every README generated during
+     * this workflow run.
+     */
+    for (
+      const readme of generatedReadmes
+    ) {
       if (fs.existsSync(readme)) {
         fs.unlinkSync(readme);
+
         console.log(
           `Removed generated README: ${readme}`
         );
       }
     }
 
-    // Make sure nothing from this run remains staged.
-    if (generatedReadmes.length > 0) {
-      execFileSync(
-        "git",
-        ["reset", "--", ...generatedReadmes],
-        { stdio: "inherit" }
-      );
-    }
-
     throw error;
   }
 
   if (generatedReadmes.length === 0) {
-    console.log("No new READMEs were generated.");
+    console.log(
+      "No new READMEs were generated."
+    );
     return;
   }
 
+  /*
+   * Stage ONLY generated README files.
+   */
   execFileSync(
     "git",
-    ["add", "--", ...generatedReadmes],
-    { stdio: "inherit" }
+    [
+      "add",
+      "--",
+      ...generatedReadmes,
+    ],
+    {
+      stdio: "inherit",
+    }
   );
 
   try {
     execFileSync(
       "git",
-      ["diff", "--cached", "--quiet"],
-      { stdio: "ignore" }
+      [
+        "diff",
+        "--cached",
+        "--quiet",
+      ],
+      {
+        stdio: "ignore",
+      }
     );
 
-    console.log("No staged changes.");
+    console.log(
+      "No staged changes."
+    );
     return;
   } catch {
     // Exit code 1 means staged changes exist.
@@ -361,8 +566,14 @@ async function main() {
 
   execFileSync(
     "git",
-    ["config", "user.name", "github-actions[bot]"],
-    { stdio: "inherit" }
+    [
+      "config",
+      "user.name",
+      "github-actions[bot]",
+    ],
+    {
+      stdio: "inherit",
+    }
   );
 
   execFileSync(
@@ -372,19 +583,29 @@ async function main() {
       "user.email",
       "41898282+github-actions[bot]@users.noreply.github.com",
     ],
-    { stdio: "inherit" }
+    {
+      stdio: "inherit",
+    }
   );
 
   execFileSync(
     "git",
-    ["commit", "-m", "docs: add LeetCode problem README"],
-    { stdio: "inherit" }
+    [
+      "commit",
+      "-m",
+      "docs: add LeetCode problem README",
+    ],
+    {
+      stdio: "inherit",
+    }
   );
 
   execFileSync(
     "git",
     ["push"],
-    { stdio: "inherit" }
+    {
+      stdio: "inherit",
+    }
   );
 
   console.log(
@@ -393,6 +614,10 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Workflow failed:", error);
+  console.error(
+    "Workflow failed:",
+    error.message
+  );
+
   process.exit(1);
 });
