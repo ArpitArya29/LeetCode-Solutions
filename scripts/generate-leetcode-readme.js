@@ -8,6 +8,7 @@ const LEETCODE_API_BASE =
 const API_TIMEOUT_MS = 15000;
 const MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_OVERVIEW_LENGTH = 1000;
+const MAX_EXAMPLES = 10;
 
 const SOLUTION_EXTENSIONS = new Set([
   ".java",
@@ -64,7 +65,8 @@ async function fetchProblem(problemNumber) {
       );
     }
 
-    const contentLength = response.headers.get("content-length");
+    const contentLength =
+      response.headers.get("content-length");
 
     if (
       contentLength &&
@@ -115,24 +117,56 @@ async function fetchProblem(problemNumber) {
   }
 }
 
-function stripHtml(html) {
-  return html
-    // Remove script/style blocks and their contents.
-    .replace(
-      /<(script|style)[^>]*>[\s\S]*?<\/\1>/gi,
-      " "
-    )
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<[^>]*>/g, " ")
+function decodeHtmlEntities(text) {
+  return text
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/&#x27;/gi, "'")
+    .replace(/&#(\d+);/g, (_, code) => {
+      const value = Number(code);
+
+      if (
+        Number.isInteger(value) &&
+        value >= 0 &&
+        value <= 0x10ffff
+      ) {
+        return String.fromCodePoint(value);
+      }
+
+      return "";
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => {
+      const value = parseInt(code, 16);
+
+      if (
+        Number.isInteger(value) &&
+        value >= 0 &&
+        value <= 0x10ffff
+      ) {
+        return String.fromCodePoint(value);
+      }
+
+      return "";
+    });
+}
+
+function stripHtml(html) {
+  return decodeHtmlEntities(
+    html
+      .replace(
+        /<(script|style)[^>]*>[\s\S]*?<\/\1>/gi,
+        " "
+      )
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
 }
 
 function createProblemOverview(content) {
@@ -177,11 +211,190 @@ function createProblemOverview(content) {
   return overview;
 }
 
+function extractExamples(content) {
+  if (
+    typeof content !== "string" ||
+    content.trim().length === 0
+  ) {
+    throw new Error(
+      "Problem content is missing; examples cannot be extracted."
+    );
+  }
+
+  /*
+   * LeetCode problem content normally contains blocks such as:
+   *
+   * Example 1:
+   * Input: ...
+   * Output: ...
+   * Explanation: ...
+   *
+   * We extract the HTML block for each example first,
+   * then convert only that block to Markdown-safe text.
+   */
+
+  const examplePattern =
+    /(?:<p[^>]*>\s*)?<strong>\s*Example\s+(\d+)\s*:?\s*<\/strong>[\s\S]*?(?=(?:<p[^>]*>\s*)?<strong>\s*Example\s+\d+\s*:?\s*<\/strong>|$)/gi;
+
+  const matches = [
+    ...content.matchAll(examplePattern),
+  ];
+
+  if (matches.length === 0) {
+    throw new Error(
+      "Could not find any sample examples in the problem content."
+    );
+  }
+
+  const examples = [];
+
+  for (
+    const match of matches.slice(0, MAX_EXAMPLES)
+  ) {
+    const exampleNumber = match[1];
+    let html = match[0];
+
+    /*
+     * Remove the "Example N:" heading from the body
+     * because we generate our own Markdown heading.
+     */
+    html = html.replace(
+      /(?:<p[^>]*>\s*)?<strong>\s*Example\s+\d+\s*:?\s*<\/strong>\s*(?:<\/p>)?/i,
+      ""
+    );
+
+    /*
+     * Convert common LeetCode labels into Markdown.
+     */
+    html = html.replace(
+      /<strong>\s*Input\s*:?\s*<\/strong>/gi,
+      "\nINPUT_LABEL\n"
+    );
+
+    html = html.replace(
+      /<strong>\s*Output\s*:?\s*<\/strong>/gi,
+      "\nOUTPUT_LABEL\n"
+    );
+
+    html = html.replace(
+      /<strong>\s*Explanation\s*:?\s*<\/strong>/gi,
+      "\nEXPLANATION_LABEL\n"
+    );
+
+    html = html.replace(
+      /<strong>\s*Constraints\s*:?\s*<\/strong>/gi,
+      "\nCONSTRAINTS_LABEL\n"
+    );
+
+    /*
+     * Preserve code/pre content before stripping HTML.
+     */
+    html = html.replace(
+      /<pre[^>]*>([\s\S]*?)<\/pre>/gi,
+      (_, code) => `\nCODE_BLOCK_START\n${code}\nCODE_BLOCK_END\n`
+    );
+
+    let text = html
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n")
+      .replace(/<[^>]*>/g, " ");
+
+    text = decodeHtmlEntities(text);
+
+    /*
+     * Normalize whitespace without destroying line
+     * boundaries that separate Input/Output/Explanation.
+     */
+    text = text
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n\s*\n+/g, "\n")
+      .trim();
+
+    const inputMatch = text.match(
+      /INPUT_LABEL\s*([\s\S]*?)(?=OUTPUT_LABEL|EXPLANATION_LABEL|$)/i
+    );
+
+    const outputMatch = text.match(
+      /OUTPUT_LABEL\s*([\s\S]*?)(?=EXPLANATION_LABEL|$)/i
+    );
+
+    const explanationMatch = text.match(
+      /EXPLANATION_LABEL\s*([\s\S]*?)$/i
+    );
+
+    const input = inputMatch
+      ? inputMatch[1].trim()
+      : "";
+
+    const output = outputMatch
+      ? outputMatch[1].trim()
+      : "";
+
+    const explanation = explanationMatch
+      ? explanationMatch[1].trim()
+      : "";
+
+    /*
+     * An example without at least Input and Output isn't
+     * reliable enough to put into the README.
+     */
+    if (!input || !output) {
+      continue;
+    }
+
+    examples.push({
+      number: exampleNumber,
+      input,
+      output,
+      explanation,
+    });
+  }
+
+  if (examples.length === 0) {
+    throw new Error(
+      "Examples were found, but none could be safely parsed."
+    );
+  }
+
+  return examples;
+}
+
+function formatExamples(examples) {
+  return examples
+    .map((example) => {
+      let result = `### Example ${example.number}
+
+**Input:**
+
+\`\`\`text
+${example.input}
+\`\`\`
+
+**Output:**
+
+\`\`\`text
+${example.output}
+\`\`\``;
+
+      if (example.explanation) {
+        result += `
+
+**Explanation:**
+
+${example.explanation}`;
+      }
+
+      return result;
+    })
+    .join("\n\n");
+}
+
 function getChangedFiles() {
   if (
     isValidCommitSha(BEFORE_SHA) &&
     isValidCommitSha(AFTER_SHA) &&
-    BEFORE_SHA !== "0000000000000000000000000000000000000000"
+    BEFORE_SHA !==
+      "0000000000000000000000000000000000000000"
   ) {
     try {
       return execFileSync(
@@ -244,7 +457,10 @@ function getProblemDirectories(changedFiles) {
 
     const directory = path.dirname(file);
 
-    if (directory && directory !== ".") {
+    if (
+      directory &&
+      directory !== "."
+    ) {
       directories.add(directory);
     }
   }
@@ -272,9 +488,14 @@ function getSolutionFiles(problemDirectory) {
     .readdirSync(problemDirectory)
     .filter((file) => {
       const fullPath =
-        path.join(problemDirectory, file);
+        path.join(
+          problemDirectory,
+          file
+        );
 
-      if (!fs.statSync(fullPath).isFile()) {
+      if (
+        !fs.statSync(fullPath).isFile()
+      ) {
         return false;
       }
 
@@ -286,7 +507,9 @@ function getSolutionFiles(problemDirectory) {
 }
 
 function validateLeetCodeUrl(value) {
-  if (typeof value !== "string") {
+  if (
+    typeof value !== "string"
+  ) {
     throw new Error(
       "Problem URL is missing from API response."
     );
@@ -312,7 +535,9 @@ function validateLeetCodeUrl(value) {
   }
 
   if (
-    !parsed.pathname.startsWith("/problems/")
+    !parsed.pathname.startsWith(
+      "/problems/"
+    )
   ) {
     throw new Error(
       "Problem API returned an invalid LeetCode problem URL."
@@ -326,18 +551,29 @@ function createReadme({
   problemNumber,
   title,
   overview,
+  examples,
   problemUrl,
   solutionFiles,
 }) {
-  const solutionList = solutionFiles
-    .map((file) => `- \`${file}\``)
-    .join("\n");
+  const solutionList =
+    solutionFiles
+      .map(
+        (file) => `- \`${file}\``
+      )
+      .join("\n");
+
+  const examplesMarkdown =
+    formatExamples(examples);
 
   return `# ${problemNumber}. ${title}
 
 ## Problem Overview
 
 ${overview}
+
+## Examples
+
+${examplesMarkdown}
 
 ## Solution
 
@@ -354,13 +590,16 @@ ${solutionList}
 async function processProblemDirectory(
   problemDirectory
 ) {
-  const readmePath = path.join(
-    problemDirectory,
-    "README.md"
-  );
+  const readmePath =
+    path.join(
+      problemDirectory,
+      "README.md"
+    );
 
   // Never overwrite an existing README.
-  if (fs.existsSync(readmePath)) {
+  if (
+    fs.existsSync(readmePath)
+  ) {
     console.log(
       `README already exists: ${readmePath}`
     );
@@ -369,10 +608,14 @@ async function processProblemDirectory(
   }
 
   const folderName =
-    path.basename(problemDirectory);
+    path.basename(
+      problemDirectory
+    );
 
   const problemInfo =
-    extractProblemInfo(folderName);
+    extractProblemInfo(
+      folderName
+    );
 
   if (!problemInfo) {
     throw new Error(
@@ -390,15 +633,20 @@ async function processProblemDirectory(
   );
 
   const problem =
-    await fetchProblem(problemNumber);
+    await fetchProblem(
+      problemNumber
+    );
 
   /*
-   * We deliberately take the problem number and title
-   * from the trusted folder created by Leet2Hub.
+   * The folder created by Leet2Hub is the source
+   * for the problem number and title.
    *
-   * The external API is used only for the description
-   * and official LeetCode URL.
+   * The external API is used for:
+   * - problem description
+   * - sample examples
+   * - official LeetCode URL
    */
+
   const apiProblemNumber =
     problem.questionFrontendId;
 
@@ -406,9 +654,10 @@ async function processProblemDirectory(
     problem.content;
 
   const problemUrl =
-    validateLeetCodeUrl(problem.url);
+    validateLeetCodeUrl(
+      problem.url
+    );
 
-  // Cross-check the problem number.
   if (
     apiProblemNumber &&
     String(apiProblemNumber) !==
@@ -420,30 +669,41 @@ async function processProblemDirectory(
   }
 
   const overview =
-    createProblemOverview(content);
+    createProblemOverview(
+      content
+    );
+
+  const examples =
+    extractExamples(
+      content
+    );
 
   const solutionFiles =
-    getSolutionFiles(problemDirectory);
+    getSolutionFiles(
+      problemDirectory
+    );
 
-  if (solutionFiles.length === 0) {
+  if (
+    solutionFiles.length === 0
+  ) {
     throw new Error(
       `No solution files found in ${problemDirectory}.`
     );
   }
 
-  const readme = createReadme({
-    problemNumber,
-    title,
-    overview,
-    problemUrl,
-    solutionFiles,
-  });
+  const readme =
+    createReadme({
+      problemNumber,
+      title,
+      overview,
+      examples,
+      problemUrl,
+      solutionFiles,
+    });
 
   /*
-   * IMPORTANT:
-   *
-   * The README is written only after every required
-   * value has passed validation.
+   * Nothing is written until every required
+   * piece of data has passed validation.
    */
   fs.writeFileSync(
     readmePath,
@@ -467,9 +727,13 @@ async function main() {
     getChangedFiles();
 
   const problemDirectories =
-    getProblemDirectories(changedFiles);
+    getProblemDirectories(
+      changedFiles
+    );
 
-  if (problemDirectories.length === 0) {
+  if (
+    problemDirectories.length === 0
+  ) {
     console.log(
       "No solution files detected."
     );
@@ -484,7 +748,8 @@ async function main() {
 
   try {
     for (
-      const directory of problemDirectories
+      const directory
+      of problemDirectories
     ) {
       const readme =
         await processProblemDirectory(
@@ -492,25 +757,34 @@ async function main() {
         );
 
       if (readme) {
-        generatedReadmes.push(readme);
+        generatedReadmes.push(
+          readme
+        );
       }
     }
   } catch (error) {
     console.error(
       "README generation failed."
     );
-    console.error(error.message);
+    console.error(
+      error.message
+    );
 
     /*
      * Fail closed:
-     * remove every README generated during
-     * this workflow run.
+     * remove every README generated
+     * during this workflow run.
      */
     for (
-      const readme of generatedReadmes
+      const readme
+      of generatedReadmes
     ) {
-      if (fs.existsSync(readme)) {
-        fs.unlinkSync(readme);
+      if (
+        fs.existsSync(readme)
+      ) {
+        fs.unlinkSync(
+          readme
+        );
 
         console.log(
           `Removed generated README: ${readme}`
@@ -521,7 +795,9 @@ async function main() {
     throw error;
   }
 
-  if (generatedReadmes.length === 0) {
+  if (
+    generatedReadmes.length === 0
+  ) {
     console.log(
       "No new READMEs were generated."
     );
