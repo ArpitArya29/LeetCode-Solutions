@@ -13,8 +13,8 @@ LeetCode-Solutions/
 ├── 01-Arrays-and-Hashing/
 │   └── Problem/
 ├── 02-Two-Pointers/
-├── 03-Sliding-Window/
-├── 04-Stack/
+├── 03-Stack-and-Queues/
+├── 04-String Manipulation/
 ├── 05-Binary-Search/
 ├── 06-Linked-List/
 ├── 07-Trees/
