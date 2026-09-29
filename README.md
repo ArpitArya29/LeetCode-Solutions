@@ -13,9 +13,9 @@ LeetCode-Solutions/
 ├── 01-Arrays-and-Hashing/
 │   └── Problem/
 ├── 02-Two-Pointers/
-├── 03-Stack-and-Queues/
+├── 03-Stack-and-Queue/
 ├── 04-String Manipulation/
-├── 05-Binary-Search/
+├── 05-Sorting-and-Searching/
 ├── 06-Linked-List/
 ├── 07-Trees/
 ├── 08-Tries/
