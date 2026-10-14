@@ -17,7 +17,7 @@ LeetCode-Solutions/
 ├── 04-String Manipulation/
 ├── 05-Sorting-and-Searching/
 ├── 06-Linked-List/
-├── 07-Trees/
+├── 07-Greedy-Algorithms/
 ├── 08-Tries/
 ├── 09-Heap-Priority-Queue/
 ├── 10-Backtracking/
