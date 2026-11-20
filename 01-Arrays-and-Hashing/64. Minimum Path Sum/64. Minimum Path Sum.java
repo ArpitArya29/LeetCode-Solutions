@@ -22,6 +22,24 @@
 22
 23        int[][] dpArr = new int[rows][cols];
 24
-25        return minSum(0, 0, rows, cols, grid, dpArr);
-26    }
-27}
+25        // return minSum(0, 0, rows, cols, grid, dpArr);
+26
+27        // tabulation method
+28        for(int i=0; i<rows; i++) {
+29            for(int j=0; j<cols; j++) {
+30                if(i==0 && j==0) dpArr[i][j] = grid[i][j];
+31                else {
+32                    int left = Integer.MAX_VALUE;
+33                    int up = Integer.MAX_VALUE;
+34
+35                    if(i > 0) up = dpArr[i-1][j];
+36                    if(j > 0) left = dpArr[i][j-1];
+37
+38                    dpArr[i][j] = grid[i][j] + Math.min(up, left);
+39                }
+40            }
+41        }
+42
+43        return dpArr[rows-1][cols-1];
+44    }
+45}
